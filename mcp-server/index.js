@@ -92,48 +92,98 @@ function browseCatalog(catalogName) {
   };
 }
 
-/** Install: return file objects for a catalog (or single skill) */
-function installCatalog(catalogName, skillName) {
+/**
+ * Install: return MCP content array with one item per file.
+ * First item is instructions + manifest. Each subsequent item
+ * is a single file the agent should write using its Write tool.
+ */
+function buildInstallResponse(catalogName, skillName) {
   const manifest = loadCatalogManifest(catalogName);
-  if (!manifest) return { error: `Catalog "${catalogName}" not found.` };
+  if (!manifest) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Error: Catalog "${catalogName}" not found.`,
+        },
+      ],
+    };
+  }
 
   const catalogPath = path.join(REPO_ROOT, catalogName);
   const allSkills = collectSkills(catalogPath);
-  const files = [];
 
-  // Include CLAUDE.md
-  const claudeMd = readFile(path.join(catalogPath, "CLAUDE.md"));
-  if (claudeMd) {
-    files.push({
-      path: "CLAUDE.md",
-      type: "project-config",
-      merge_hint: "append_as_section",
-      content: claudeMd,
-    });
+  // Validate skill_name
+  if (skillName) {
+    const match = allSkills.find((s) => s.name === skillName);
+    if (!match) {
+      const available = allSkills.map((s) => s.name).join(", ");
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error: Skill "${skillName}" not found in "${catalogName}". Available: ${available}`,
+          },
+        ],
+      };
+    }
   }
 
-  // Filter to requested skill or include all
   const targetSkills = skillName
     ? allSkills.filter((s) => s.name === skillName)
     : allSkills;
 
-  if (skillName && targetSkills.length === 0) {
-    const available = allSkills.map((s) => s.name).join(", ");
-    return {
-      error: `Skill "${skillName}" not found in catalog "${catalogName}".`,
-      available_skills: available,
-    };
+  const contentItems = [];
+
+  // First item: instructions for the agent
+  const dirs = (manifest.install?.directories || []).map((d) => `  mkdir -p ${d}`).join("\n");
+  const fileList = [];
+  const claudeMd = readFile(path.join(catalogPath, "CLAUDE.md"));
+  if (claudeMd) fileList.push("CLAUDE.md (merge_hint: append_as_section)");
+  for (const s of targetSkills) {
+    fileList.push(`.claude/skills/${s.name}/SKILL.md`);
   }
 
-  for (const skill of targetSkills) {
-    files.push({
-      path: `.claude/skills/${skill.name}/SKILL.md`,
-      type: "skill",
-      content: skill.content,
+  contentItems.push({
+    type: "text",
+    text: [
+      `# Install: ${manifest.name} (${manifest.version})`,
+      "",
+      `${manifest.description}`,
+      "",
+      "## Instructions",
+      "",
+      `Create these directories first:`,
+      dirs,
+      "",
+      `Then write each file below using the Write tool. Each file is returned as a separate item with a "--- FILE: <path> ---" header followed by the content to write.`,
+      "",
+      `Files to write (${fileList.length}):`,
+      ...fileList.map((f) => `  - ${f}`),
+      "",
+      `## Post-install`,
+      "",
+      manifest.post_install_message || "Done.",
+    ].join("\n"),
+  });
+
+  // CLAUDE.md
+  if (claudeMd) {
+    contentItems.push({
+      type: "text",
+      text: `--- FILE: CLAUDE.md ---\n--- MERGE_HINT: append_as_section ---\n${claudeMd}`,
     });
   }
 
-  return { manifest, files };
+  // Each skill as its own content item
+  for (const skill of targetSkills) {
+    contentItems.push({
+      type: "text",
+      text: `--- FILE: .claude/skills/${skill.name}/SKILL.md ---\n${skill.content}`,
+    });
+  }
+
+  return { content: contentItems };
 }
 
 async function main() {
@@ -150,7 +200,9 @@ async function main() {
         'Browse and install Claude Code skill sets. ' +
         'Call with no arguments to list available catalogs (e.g. marketing, sales). ' +
         'Set catalog to browse skills within one. ' +
-        'Set action to "install" to get full file contents with target paths, ready to write to disk. ' +
+        'Set action to "install" to get installable files — each file is returned as a separate content item ' +
+        'with a "--- FILE: <path> ---" header. Create the listed directories, then use Write to save each file at its path. ' +
+        'No scripting or JSON parsing needed. ' +
         'Trigger phrases: "install marketing skills", "what skills are available", "set up sales workspace".',
       inputSchema: z.object({
         action: z
@@ -175,13 +227,16 @@ async function main() {
     },
     async ({ action, catalog, skill_name }) => {
       const effectiveAction = action || "browse";
-      let result;
 
+      // Install mode returns its own content array (one item per file)
+      if (catalog && effectiveAction === "install") {
+        return buildInstallResponse(catalog, skill_name);
+      }
+
+      // Browse modes return JSON
+      let result;
       if (!catalog) {
-        // No catalog specified: list all catalogs
         result = browseCatalogs();
-      } else if (effectiveAction === "install") {
-        result = installCatalog(catalog, skill_name);
       } else {
         result = browseCatalog(catalog);
       }
