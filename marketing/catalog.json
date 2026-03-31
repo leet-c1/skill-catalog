@@ -1,0 +1,13 @@
+{
+  "name": "marketing",
+  "version": "1.0.0",
+  "description": "Marketing workspace with GA4, SEO, campaigns, content, and reporting skills.",
+  "post_install_message": "Say 'Help me set up our product marketing context' to create your foundation document (~20 min). Six of seven skills read it on startup so they already know your product and audience. Without it they still work, but each will ask foundational questions every time.",
+  "install": {
+    "directories": [".claude/skills", ".agents"],
+    "conflict_strategy": "prompt_user"
+  },
+  "files": [
+    { "path": "CLAUDE.md", "type": "project-config", "merge_hint": "append_as_section" }
+  ]
+}

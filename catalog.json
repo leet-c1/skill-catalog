@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "catalogs": [
+    {
+      "name": "marketing",
+      "description": "GA4, SEO, campaigns, content, and reporting",
+      "path": "marketing"
+    },
+    {
+      "name": "sales",
+      "description": "Prospecting, pipeline management, deal reviews",
+      "path": "sales"
+    }
+  ]
+}

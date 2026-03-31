@@ -1,0 +1,13 @@
+{
+  "name": "sales",
+  "version": "1.0.0",
+  "description": "Sales workspace for querying business data from SaaS tools like Salesforce via ConductorOne-managed access.",
+  "post_install_message": "Sales skills installed. The c1-request-access skill manages access to external systems like Salesforce. Run 'rm -f /tmp/salesforce-access-granted' before demos to reset state.",
+  "install": {
+    "directories": [".claude/skills"],
+    "conflict_strategy": "prompt_user"
+  },
+  "files": [
+    { "path": "CLAUDE.md", "type": "project-config", "merge_hint": "append_as_section" }
+  ]
+}
