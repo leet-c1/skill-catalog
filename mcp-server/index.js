@@ -93,9 +93,9 @@ function browseCatalog(catalogName) {
 }
 
 /**
- * Install: return MCP content array with one item per file.
- * First item is instructions + manifest. Each subsequent item
- * is a single file the agent should write using its Write tool.
+ * Install: return a single text document with clear instructions and
+ * each file's content inline, delimited so the agent can read and
+ * write each one directly using its Write tool. No JSON parsing needed.
  */
 function buildInstallResponse(catalogName, skillName) {
   const manifest = loadCatalogManifest(catalogName);
@@ -133,57 +133,57 @@ function buildInstallResponse(catalogName, skillName) {
     ? allSkills.filter((s) => s.name === skillName)
     : allSkills;
 
-  const contentItems = [];
-
-  // First item: instructions for the agent
-  const dirs = (manifest.install?.directories || []).map((d) => `  mkdir -p ${d}`).join("\n");
-  const fileList = [];
   const claudeMd = readFile(path.join(catalogPath, "CLAUDE.md"));
-  if (claudeMd) fileList.push("CLAUDE.md (merge_hint: append_as_section)");
-  for (const s of targetSkills) {
-    fileList.push(`.claude/skills/${s.name}/SKILL.md`);
-  }
+  const dirs = (manifest.install?.directories || []);
 
-  contentItems.push({
-    type: "text",
-    text: [
-      `# Install: ${manifest.name} (${manifest.version})`,
-      "",
-      `${manifest.description}`,
-      "",
-      "## Instructions",
-      "",
-      `Create these directories first:`,
-      dirs,
-      "",
-      `Then write each file below using the Write tool. Each file is returned as a separate item with a "--- FILE: <path> ---" header followed by the content to write.`,
-      "",
-      `Files to write (${fileList.length}):`,
-      ...fileList.map((f) => `  - ${f}`),
-      "",
-      `## Post-install`,
-      "",
-      manifest.post_install_message || "Done.",
-    ].join("\n"),
-  });
+  // Build a single document the agent can follow step by step
+  const sections = [];
+
+  sections.push([
+    `# Install: ${manifest.name} (${manifest.version})`,
+    "",
+    manifest.description,
+    "",
+    "## How to install",
+    "",
+    "Follow these steps using your standard tools (Bash for mkdir, Write for files):",
+    "",
+    `**Step 1:** Create directories:`,
+    "```bash",
+    dirs.map((d) => `mkdir -p ${d}`).join(" && "),
+    "```",
+    "",
+    `**Step 2:** Write each file below. Each section has the exact file path and the exact content to write.`,
+    "",
+    `**Step 3:** Tell the user: ${manifest.post_install_message || "Done."}`,
+  ].join("\n"));
 
   // CLAUDE.md
   if (claudeMd) {
-    contentItems.push({
-      type: "text",
-      text: `--- FILE: CLAUDE.md ---\n--- MERGE_HINT: append_as_section ---\n${claudeMd}`,
-    });
+    sections.push([
+      "========================================",
+      "WRITE FILE: CLAUDE.md",
+      "NOTE: If CLAUDE.md already exists, append this content as a new section instead of overwriting.",
+      "========================================",
+      "",
+      claudeMd,
+    ].join("\n"));
   }
 
-  // Each skill as its own content item
+  // Each skill
   for (const skill of targetSkills) {
-    contentItems.push({
-      type: "text",
-      text: `--- FILE: .claude/skills/${skill.name}/SKILL.md ---\n${skill.content}`,
-    });
+    sections.push([
+      "========================================",
+      `WRITE FILE: .claude/skills/${skill.name}/SKILL.md`,
+      "========================================",
+      "",
+      skill.content,
+    ].join("\n"));
   }
 
-  return { content: contentItems };
+  return {
+    content: [{ type: "text", text: sections.join("\n\n") }],
+  };
 }
 
 async function main() {
@@ -200,9 +200,8 @@ async function main() {
         'Browse and install Claude Code skill sets. ' +
         'Call with no arguments to list available catalogs (e.g. marketing, sales). ' +
         'Set catalog to browse skills within one. ' +
-        'Set action to "install" to get installable files — each file is returned as a separate content item ' +
-        'with a "--- FILE: <path> ---" header. Create the listed directories, then use Write to save each file at its path. ' +
-        'No scripting or JSON parsing needed. ' +
+        'Set action to "install" to get file contents with paths — follow the returned instructions to write each file using your Write tool. ' +
+        'Do NOT parse the output with scripts. Just read the instructions and use mkdir + Write for each file. ' +
         'Trigger phrases: "install marketing skills", "what skills are available", "set up sales workspace".',
       inputSchema: z.object({
         action: z
