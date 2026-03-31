@@ -68,156 +68,165 @@ function loadCatalogManifest(catalogName) {
   return readJson(path.join(REPO_ROOT, catalogName, "catalog.json"));
 }
 
-/** Browse: list all catalogs */
-function browseCatalogs() {
-  const root = loadRootCatalog();
-  if (!root) return { error: "No catalog.json found at repo root." };
-  return {
-    version: root.version,
-    catalogs: root.catalogs,
-  };
-}
-
-/** Browse: list skills in one catalog */
-function browseCatalog(catalogName) {
-  const manifest = loadCatalogManifest(catalogName);
-  if (!manifest) return { error: `Catalog "${catalogName}" not found.` };
-
-  const catalogPath = path.join(REPO_ROOT, catalogName);
-  const skills = collectSkills(catalogPath);
-
-  return {
-    manifest,
-    skills: skills.map((s) => ({ name: s.name, description: s.description })),
-  };
-}
-
-/** Install: write files directly to the target directory */
-function installCatalog(catalogName, skillName, targetDir) {
-  const manifest = loadCatalogManifest(catalogName);
-  if (!manifest) {
-    return { error: `Catalog "${catalogName}" not found.` };
-  }
-
-  const catalogPath = path.join(REPO_ROOT, catalogName);
-  const allSkills = collectSkills(catalogPath);
-
-  if (skillName) {
-    const match = allSkills.find((s) => s.name === skillName);
-    if (!match) {
-      const available = allSkills.map((s) => s.name).join(", ");
-      return { error: `Skill "${skillName}" not found. Available: ${available}` };
-    }
-  }
-
-  const targetSkills = skillName
-    ? allSkills.filter((s) => s.name === skillName)
-    : allSkills;
-
-  // Create directories
-  for (const dir of manifest.install?.directories || []) {
-    fs.mkdirSync(path.join(targetDir, dir), { recursive: true });
-  }
-
-  const written = [];
-
-  // Write CLAUDE.md
-  const claudeMd = readFile(path.join(catalogPath, "CLAUDE.md"));
-  if (claudeMd) {
-    const dest = path.join(targetDir, "CLAUDE.md");
-    const existing = readFile(dest);
-    if (existing) {
-      fs.writeFileSync(dest, existing + "\n\n" + claudeMd);
-      written.push("CLAUDE.md (appended to existing)");
-    } else {
-      fs.writeFileSync(dest, claudeMd);
-      written.push("CLAUDE.md");
-    }
-  }
-
-  // Write each skill
-  for (const skill of targetSkills) {
-    const skillDir = path.join(targetDir, ".claude", "skills", skill.name);
-    fs.mkdirSync(skillDir, { recursive: true });
-    fs.writeFileSync(path.join(skillDir, "SKILL.md"), skill.content);
-    written.push(`.claude/skills/${skill.name}/SKILL.md`);
-  }
-
-  return {
-    installed: manifest.name,
-    version: manifest.version,
-    files_written: written,
-    post_install_message: manifest.post_install_message,
-  };
-}
-
 async function main() {
   const server = new McpServer({
     name: "skill-catalog",
     version: "1.0.0",
   });
 
+  // ── browse-catalog ──────────────────────────────────────────────
+  // Light tool: lists catalogs or skills. Small response, no file content.
   server.registerTool(
-    "skill-catalog",
+    "browse-catalog",
     {
-      title: "Skill Catalog",
+      title: "Browse Skill Catalog",
       description:
-        'Browse and install Claude Code skill sets. ' +
-        'Call with no arguments to list available catalogs (e.g. marketing, sales). ' +
-        'Set catalog to browse skills within one. ' +
-        'Set action to "install" with target_dir to write skill files directly to disk — no extra steps needed. ' +
-        'Trigger phrases: "install marketing skills", "what skills are available", "set up sales workspace".',
+        'List available skill catalogs, or list skills within a catalog. ' +
+        'Call with no arguments to see all catalogs. Set catalog to see its skills. ' +
+        'Trigger phrases: "what skills are available", "list catalogs", "show marketing skills".',
       inputSchema: z.object({
-        action: z
-          .enum(["browse", "install"])
-          .optional()
-          .describe(
-            '"browse" (default) returns summaries. "install" writes files directly to target_dir.'
-          ),
         catalog: z
           .string()
           .optional()
           .describe(
             'Catalog name (e.g. "marketing", "sales"). Omit to list all catalogs.'
           ),
+      }),
+    },
+    async ({ catalog }) => {
+      let result;
+      if (!catalog) {
+        const root = loadRootCatalog();
+        if (!root) {
+          result = { error: "No catalog.json found." };
+        } else {
+          result = { version: root.version, catalogs: root.catalogs };
+        }
+      } else {
+        const manifest = loadCatalogManifest(catalog);
+        if (!manifest) {
+          result = { error: `Catalog "${catalog}" not found.` };
+        } else {
+          const catalogPath = path.join(REPO_ROOT, catalog);
+          const skills = collectSkills(catalogPath);
+          result = {
+            manifest,
+            skills: skills.map((s) => ({
+              name: s.name,
+              description: s.description,
+            })),
+          };
+        }
+      }
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
+
+  // ── get-skill ───────────────────────────────────────────────────
+  // Returns ONE file at a time. Agent calls this in a loop per skill.
+  // Each response is small enough to stay in context.
+  server.registerTool(
+    "get-skill",
+    {
+      title: "Get Skill File",
+      description:
+        'Get the content of a single skill file or the CLAUDE.md for a catalog. ' +
+        'Returns the file path and content. Use your Write tool to save it. ' +
+        'Call once per file. To install a full catalog, first call browse-catalog to get the skill list, ' +
+        'then call get-skill for each skill name, plus once with file_type="claude-md" for the CLAUDE.md.',
+      inputSchema: z.object({
+        catalog: z
+          .string()
+          .describe('Catalog name (e.g. "marketing", "sales").'),
         skill_name: z
           .string()
           .optional()
           .describe(
-            'Optional: install a specific skill only (e.g. "seo").'
+            'Skill to retrieve (e.g. "seo", "google-analytics"). Omit if fetching CLAUDE.md.'
           ),
-        target_dir: z
-          .string()
+        file_type: z
+          .enum(["skill", "claude-md"])
           .optional()
           .describe(
-            'Absolute path to the directory where files should be written. Required for action "install". Use the current working directory.'
+            '"skill" (default) returns a SKILL.md. "claude-md" returns the catalog\'s CLAUDE.md.'
           ),
       }),
     },
-    async ({ action, catalog, skill_name, target_dir }) => {
-      const effectiveAction = action || "browse";
-
-      if (catalog && effectiveAction === "install") {
-        if (!target_dir) {
-          return {
-            content: [{ type: "text", text: "Error: target_dir is required for install." }],
-          };
-        }
-        const result = installCatalog(catalog, skill_name, target_dir);
+    async ({ catalog, skill_name, file_type }) => {
+      const effectiveType = file_type || "skill";
+      const manifest = loadCatalogManifest(catalog);
+      if (!manifest) {
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: `Error: Catalog "${catalog}" not found.` }],
         };
       }
 
-      let result;
-      if (!catalog) {
-        result = browseCatalogs();
-      } else {
-        result = browseCatalog(catalog);
+      const catalogPath = path.join(REPO_ROOT, catalog);
+
+      if (effectiveType === "claude-md") {
+        const claudeMd = readFile(path.join(catalogPath, "CLAUDE.md"));
+        if (!claudeMd) {
+          return {
+            content: [{ type: "text", text: `No CLAUDE.md found in catalog "${catalog}".` }],
+          };
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  path: "CLAUDE.md",
+                  merge_hint: "append_as_section",
+                  post_install_message: manifest.post_install_message,
+                  directories_to_create: manifest.install?.directories || [],
+                  content: claudeMd,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      // skill type
+      if (!skill_name) {
+        return {
+          content: [{ type: "text", text: "Error: skill_name is required when file_type is skill." }],
+        };
+      }
+
+      const allSkills = collectSkills(catalogPath);
+      const skill = allSkills.find((s) => s.name === skill_name);
+      if (!skill) {
+        const available = allSkills.map((s) => s.name).join(", ");
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error: Skill "${skill_name}" not found. Available: ${available}`,
+            },
+          ],
+        };
       }
 
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                path: `.claude/skills/${skill.name}/SKILL.md`,
+                content: skill.content,
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     }
   );
