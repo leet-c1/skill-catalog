@@ -92,40 +92,21 @@ function browseCatalog(catalogName) {
   };
 }
 
-/**
- * Install: return a single text document with clear instructions and
- * each file's content inline, delimited so the agent can read and
- * write each one directly using its Write tool. No JSON parsing needed.
- */
-function buildInstallResponse(catalogName, skillName) {
+/** Install: write files directly to the target directory */
+function installCatalog(catalogName, skillName, targetDir) {
   const manifest = loadCatalogManifest(catalogName);
   if (!manifest) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Error: Catalog "${catalogName}" not found.`,
-        },
-      ],
-    };
+    return { error: `Catalog "${catalogName}" not found.` };
   }
 
   const catalogPath = path.join(REPO_ROOT, catalogName);
   const allSkills = collectSkills(catalogPath);
 
-  // Validate skill_name
   if (skillName) {
     const match = allSkills.find((s) => s.name === skillName);
     if (!match) {
       const available = allSkills.map((s) => s.name).join(", ");
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error: Skill "${skillName}" not found in "${catalogName}". Available: ${available}`,
-          },
-        ],
-      };
+      return { error: `Skill "${skillName}" not found. Available: ${available}` };
     }
   }
 
@@ -133,56 +114,40 @@ function buildInstallResponse(catalogName, skillName) {
     ? allSkills.filter((s) => s.name === skillName)
     : allSkills;
 
-  const claudeMd = readFile(path.join(catalogPath, "CLAUDE.md"));
-  const dirs = (manifest.install?.directories || []);
-
-  // Build a single document the agent can follow step by step
-  const sections = [];
-
-  sections.push([
-    `# Install: ${manifest.name} (${manifest.version})`,
-    "",
-    manifest.description,
-    "",
-    "## How to install",
-    "",
-    "Follow these steps using your standard tools (Bash for mkdir, Write for files):",
-    "",
-    `**Step 1:** Create directories:`,
-    "```bash",
-    dirs.map((d) => `mkdir -p ${d}`).join(" && "),
-    "```",
-    "",
-    `**Step 2:** Write each file below. Each section has the exact file path and the exact content to write.`,
-    "",
-    `**Step 3:** Tell the user: ${manifest.post_install_message || "Done."}`,
-  ].join("\n"));
-
-  // CLAUDE.md
-  if (claudeMd) {
-    sections.push([
-      "========================================",
-      "WRITE FILE: CLAUDE.md",
-      "NOTE: If CLAUDE.md already exists, append this content as a new section instead of overwriting.",
-      "========================================",
-      "",
-      claudeMd,
-    ].join("\n"));
+  // Create directories
+  for (const dir of manifest.install?.directories || []) {
+    fs.mkdirSync(path.join(targetDir, dir), { recursive: true });
   }
 
-  // Each skill
+  const written = [];
+
+  // Write CLAUDE.md
+  const claudeMd = readFile(path.join(catalogPath, "CLAUDE.md"));
+  if (claudeMd) {
+    const dest = path.join(targetDir, "CLAUDE.md");
+    const existing = readFile(dest);
+    if (existing) {
+      fs.writeFileSync(dest, existing + "\n\n" + claudeMd);
+      written.push("CLAUDE.md (appended to existing)");
+    } else {
+      fs.writeFileSync(dest, claudeMd);
+      written.push("CLAUDE.md");
+    }
+  }
+
+  // Write each skill
   for (const skill of targetSkills) {
-    sections.push([
-      "========================================",
-      `WRITE FILE: .claude/skills/${skill.name}/SKILL.md`,
-      "========================================",
-      "",
-      skill.content,
-    ].join("\n"));
+    const skillDir = path.join(targetDir, ".claude", "skills", skill.name);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, "SKILL.md"), skill.content);
+    written.push(`.claude/skills/${skill.name}/SKILL.md`);
   }
 
   return {
-    content: [{ type: "text", text: sections.join("\n\n") }],
+    installed: manifest.name,
+    version: manifest.version,
+    files_written: written,
+    post_install_message: manifest.post_install_message,
   };
 }
 
@@ -200,15 +165,14 @@ async function main() {
         'Browse and install Claude Code skill sets. ' +
         'Call with no arguments to list available catalogs (e.g. marketing, sales). ' +
         'Set catalog to browse skills within one. ' +
-        'Set action to "install" to get file contents with paths — follow the returned instructions to write each file using your Write tool. ' +
-        'Do NOT parse the output with scripts. Just read the instructions and use mkdir + Write for each file. ' +
+        'Set action to "install" with target_dir to write skill files directly to disk — no extra steps needed. ' +
         'Trigger phrases: "install marketing skills", "what skills are available", "set up sales workspace".',
       inputSchema: z.object({
         action: z
           .enum(["browse", "install"])
           .optional()
           .describe(
-            '"browse" (default) returns summaries. "install" returns full file contents with paths.'
+            '"browse" (default) returns summaries. "install" writes files directly to target_dir.'
           ),
         catalog: z
           .string()
@@ -220,19 +184,31 @@ async function main() {
           .string()
           .optional()
           .describe(
-            'Optional: target a specific skill (e.g. "seo"). Only used with a catalog.'
+            'Optional: install a specific skill only (e.g. "seo").'
+          ),
+        target_dir: z
+          .string()
+          .optional()
+          .describe(
+            'Absolute path to the directory where files should be written. Required for action "install". Use the current working directory.'
           ),
       }),
     },
-    async ({ action, catalog, skill_name }) => {
+    async ({ action, catalog, skill_name, target_dir }) => {
       const effectiveAction = action || "browse";
 
-      // Install mode returns its own content array (one item per file)
       if (catalog && effectiveAction === "install") {
-        return buildInstallResponse(catalog, skill_name);
+        if (!target_dir) {
+          return {
+            content: [{ type: "text", text: "Error: target_dir is required for install." }],
+          };
+        }
+        const result = installCatalog(catalog, skill_name, target_dir);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
       }
 
-      // Browse modes return JSON
       let result;
       if (!catalog) {
         result = browseCatalogs();
