@@ -6,6 +6,9 @@ const path = require("path");
 
 const REPO_ROOT = path.resolve(__dirname, "..");
 
+// GitHub raw URL base for direct file downloads
+const GITHUB_RAW_BASE = "https://raw.githubusercontent.com/leet-c1/skill-catalog/main";
+
 /** Read a file, return null if missing */
 function readFile(filePath) {
   try {
@@ -75,7 +78,6 @@ async function main() {
   });
 
   // ── browse-catalog ──────────────────────────────────────────────
-  // Light tool: lists catalogs or skills. Small response, no file content.
   server.registerTool(
     "browse-catalog",
     {
@@ -124,18 +126,18 @@ async function main() {
     }
   );
 
-  // ── get-skill ───────────────────────────────────────────────────
-  // Returns ONE file at a time. Agent calls this in a loop per skill.
-  // Each response is small enough to stay in context.
+  // ── install-catalog ─────────────────────────────────────────────
+  // Returns a list of directories to create and curl commands to run.
+  // Agent creates dirs then runs each curl. No file content passes
+  // through the agent. Works on macOS, Windows 10+, and Linux.
   server.registerTool(
-    "get-skill",
+    "install-catalog",
     {
-      title: "Get Skill File",
+      title: "Install Skill Catalog",
       description:
-        'Get the content of a single skill file or the CLAUDE.md for a catalog. ' +
-        'Returns the file path and content. Use your Write tool to save it. ' +
-        'Call once per file. To install a full catalog, first call browse-catalog to get the skill list, ' +
-        'then call get-skill for each skill name, plus once with file_type="claude-md" for the CLAUDE.md.',
+        'Install a skill catalog into the current project. Returns directories to create and curl commands to run. ' +
+        'First create the directories, then run each curl command. Do NOT use Write — curl downloads files directly. ' +
+        'Trigger phrases: "install marketing skills", "set up sales workspace", "install skills".',
       inputSchema: z.object({
         catalog: z
           .string()
@@ -143,19 +145,10 @@ async function main() {
         skill_name: z
           .string()
           .optional()
-          .describe(
-            'Skill to retrieve (e.g. "seo", "google-analytics"). Omit if fetching CLAUDE.md.'
-          ),
-        file_type: z
-          .enum(["skill", "claude-md"])
-          .optional()
-          .describe(
-            '"skill" (default) returns a SKILL.md. "claude-md" returns the catalog\'s CLAUDE.md.'
-          ),
+          .describe('Optional: install only this skill (e.g. "seo").'),
       }),
     },
-    async ({ catalog, skill_name, file_type }) => {
-      const effectiveType = file_type || "skill";
+    async ({ catalog, skill_name }) => {
       const manifest = loadCatalogManifest(catalog);
       if (!manifest) {
         return {
@@ -164,69 +157,56 @@ async function main() {
       }
 
       const catalogPath = path.join(REPO_ROOT, catalog);
+      const allSkills = collectSkills(catalogPath);
 
-      if (effectiveType === "claude-md") {
-        const claudeMd = readFile(path.join(catalogPath, "CLAUDE.md"));
-        if (!claudeMd) {
+      if (skill_name) {
+        const match = allSkills.find((s) => s.name === skill_name);
+        if (!match) {
+          const available = allSkills.map((s) => s.name).join(", ");
           return {
-            content: [{ type: "text", text: `No CLAUDE.md found in catalog "${catalog}".` }],
+            content: [{ type: "text", text: `Error: Skill "${skill_name}" not found. Available: ${available}` }],
           };
         }
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(
-                {
-                  path: "CLAUDE.md",
-                  merge_hint: "append_as_section",
-                  post_install_message: manifest.post_install_message,
-                  directories_to_create: manifest.install?.directories || [],
-                  content: claudeMd,
-                },
-                null,
-                2
-              ),
-            },
-          ],
-        };
       }
 
-      // skill type
-      if (!skill_name) {
-        return {
-          content: [{ type: "text", text: "Error: skill_name is required when file_type is skill." }],
-        };
+      const targetSkills = skill_name
+        ? allSkills.filter((s) => s.name === skill_name)
+        : allSkills;
+
+      // Directories to create
+      const dirs = [
+        ...(manifest.install?.directories || []),
+        ...targetSkills.map((s) => `.claude/skills/${s.name}`),
+      ];
+
+      // Curl commands — one per file
+      const downloads = [];
+
+      const claudeMd = readFile(path.join(catalogPath, "CLAUDE.md"));
+      if (claudeMd) {
+        downloads.push({
+          url: `${GITHUB_RAW_BASE}/${catalog}/CLAUDE.md`,
+          dest: "CLAUDE.md",
+        });
       }
 
-      const allSkills = collectSkills(catalogPath);
-      const skill = allSkills.find((s) => s.name === skill_name);
-      if (!skill) {
-        const available = allSkills.map((s) => s.name).join(", ");
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Error: Skill "${skill_name}" not found. Available: ${available}`,
-            },
-          ],
-        };
+      for (const skill of targetSkills) {
+        downloads.push({
+          url: `${GITHUB_RAW_BASE}/${catalog}/skills/${skill.name}/SKILL.md`,
+          dest: `.claude/skills/${skill.name}/SKILL.md`,
+        });
       }
+
+      const result = {
+        catalog: manifest.name,
+        version: manifest.version,
+        directories: dirs,
+        downloads,
+        post_install_message: manifest.post_install_message,
+      };
 
       return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                path: `.claude/skills/${skill.name}/SKILL.md`,
-                content: skill.content,
-              },
-              null,
-              2
-            ),
-          },
-        ],
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
     }
   );
